@@ -1,5 +1,5 @@
 use clap::Parser;
-use polkavm_common::program::{Opcode, ProgramBlob};
+use polkavm_common::program::{Opcode, ProgramBlob, Instruction};
 use std::collections::HashMap;
 use std::{
     io::Write,
@@ -206,7 +206,18 @@ fn main_disassemble(input: PathBuf, format: DisassemblyFormat, output: Option<Pa
         None
     };
 
-    match output {
+    let mut current_byte_offset: usize = 0;
+    let mut byte_offsets: Vec<usize> = Vec::new();
+
+    for (nth_instruction, maybe_instruction) in blob.instructions().enumerate() {
+            let instruction = maybe_instruction.map_err(|error| format!("failed to parse instruction #{nth_instruction}: {error}"))?;
+            let (_, instruction_size) = serialize_instruction(&instruction);
+
+            byte_offsets.push(current_byte_offset);
+            current_byte_offset += instruction_size;
+        }
+
+     match output {
         Some(output) => {
             let fp = match std::fs::File::create(&output) {
                 Ok(fp) => fp,
@@ -215,11 +226,11 @@ fn main_disassemble(input: PathBuf, format: DisassemblyFormat, output: Option<Pa
                 }
             };
 
-            disassemble_into(format, &blob, native, std::io::BufWriter::new(fp))
+            disassemble_into(format, &blob, native, byte_offsets, std::io::BufWriter::new(fp))
         }
         None => {
             let stdout = std::io::stdout();
-            disassemble_into(format, &blob, native, std::io::BufWriter::new(stdout))
+            disassemble_into(format, &blob, native, byte_offsets, std::io::BufWriter::new(stdout))
         }
     }
 }
@@ -288,10 +299,58 @@ impl AssemblyFormatter {
     }
 }
 
+fn serialize_instruction(instruction: &Instruction) -> (String, usize) {
+    let mut buffer = [0u8; 16]; // maximum instruction size?
+    let size = instruction.serialize_into(&mut buffer);
+
+    let hex_representation = buffer[..size].iter()
+        .map(|byte| format!("{:02x}", byte))
+        .collect::<Vec<String>>()
+        .join(" ");
+
+    (hex_representation, size)
+}
+
+fn find_first_instruction_binary(blob: &ProgramBlob) -> Result<Vec<u8>, String> {
+    let first_instruction = blob.instructions().next()
+        .ok_or("No instructions in the blob")?
+        .map_err(|e| format!("Error parsing first instruction: {}", e))?;
+
+    let (binary, _) = serialize_instruction(&first_instruction);
+
+    // Convert the binary string to a byte array
+    let mut result = Vec::new();
+    for byte_str in binary.split_whitespace() {
+        let byte = u8::from_str_radix(byte_str, 16)
+            .map_err(|e| format!("Error parsing byte: {}", e))?;
+        result.push(byte);
+    }
+
+    Ok(result)
+}
+
+// Function to find the true byte offset of the first instruction in the blob
+fn find_true_byte_offset(blob: &ProgramBlob, first_instruction_binary: &[u8]) -> Result<usize, String> {
+    let blob_bytes = blob.as_bytes();
+
+    blob_bytes.windows(first_instruction_binary.len())
+        .position(|window| window == first_instruction_binary)
+        .ok_or_else(|| "Binary sequence not found".to_string())
+}
+
+// Updated calculate_program_base_address function
+fn calculate_program_base_address(blob: &ProgramBlob) -> Result<usize, String> {
+    let first_instruction_binary = find_first_instruction_binary(blob)?;
+    println!("First instruction binary: {:?}", first_instruction_binary);
+    find_true_byte_offset(blob, &first_instruction_binary)
+
+}
+
 fn disassemble_into(
     format: DisassemblyFormat,
     blob: &polkavm_linker::ProgramBlob,
     native: Option<(u64, Vec<u8>, Vec<u32>)>,
+    byte_offsets: Vec<usize>,
     mut writer: impl Write,
 ) -> Result<(), String> {
     let mut instructions = Vec::new();
@@ -355,12 +414,19 @@ fn disassemble_into(
     let mut last_full_name = String::new();
     let mut jump_target_counter = 0;
     let mut pending_label = true;
+    let program_base_address = calculate_program_base_address(blob)?;
+    println!("Program base address: {:?}", program_base_address);
     for (nth_instruction, instruction) in instructions.iter().enumerate() {
+        let instruction_offset = byte_offsets[nth_instruction];
+        let offset = instruction_offset + program_base_address;
+        let (hex_representation, _) = serialize_instruction(&instruction);
+
         let instruction_s = if instruction.opcode() == polkavm_common::program::Opcode::fallthrough {
             format_jump_target(jump_target_counter + 1)
         } else {
             instruction.to_string()
         };
+        let opcode_name = format!("{:?}", instruction.opcode());
 
         let line_program = match blob.get_debug_line_program_at(nth_instruction as u32) {
             Ok(line_program) => line_program,
@@ -456,7 +522,15 @@ fn disassemble_into(
                 bail!("failed to write to output: {error}");
             }
         } else if matches!(format, DisassemblyFormat::Guest | DisassemblyFormat::GuestAndNative) {
-            if let Err(error) = writeln!(&mut writer, "{nth_instruction:6}: {instruction_s}") {
+            if let Err(error) = writeln!(
+                &mut writer,
+                "{:08x}: {:<31} {:>4}: {:<31} {}",
+                offset,
+                hex_representation,
+                nth_instruction,
+                instruction_s,
+                opcode_name
+            ) {
                 bail!("failed to write to output: {error}");
             }
         }
