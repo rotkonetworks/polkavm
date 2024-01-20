@@ -524,10 +524,9 @@ fn disassemble_into(
         } else if matches!(format, DisassemblyFormat::Guest | DisassemblyFormat::GuestAndNative) {
             if let Err(error) = writeln!(
                 &mut writer,
-                "{:08x}: {:<31} {:>4}: {:<31} {}",
+                "{:08x}: {:<31} {:<31} {}",
                 offset,
                 hex_representation,
-                nth_instruction,
                 instruction_s,
                 opcode_name
             ) {
