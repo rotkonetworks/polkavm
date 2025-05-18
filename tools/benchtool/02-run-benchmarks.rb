@@ -52,7 +52,6 @@ BENCHMARK_VMS = [
     "polkavm64_compiler_sync_gas",
     "polkavm64_interpreter",
     "solana_rbpf",
-    "wasm3",
     "wasmer",
     "wasmi_eager_checked",
     "wasmi_eager_unchecked",
@@ -112,8 +111,8 @@ begin
     sudo_run "mkdir /sys/fs/cgroup/benchtool"
     sudo_write "+cpuset", "/sys/fs/cgroup/benchtool/cgroup.subtree_control"
     sudo_write "1-2", "/sys/fs/cgroup/benchtool/cpuset.cpus"
-    sudo_write "0,3-127", "/sys/fs/cgroup/user.slice/cpuset.cpus"
-    sudo_write "0,3-127", "/sys/fs/cgroup/system.slice/cpuset.cpus"
+    sudo_write "0,3-15", "/sys/fs/cgroup/user.slice/cpuset.cpus"
+    sudo_write "0,3-15", "/sys/fs/cgroup/system.slice/cpuset.cpus"
 
     STDERR.puts "Launching child process..."
     rx, tx = IO.pipe
@@ -164,9 +163,9 @@ begin
         sudo_run "rmdir /sys/fs/cgroup/benchtool"
 
         STDERR.puts "Restoring misc. tweaks..."
-        sudo_write "ffffffff,ffffffff,ffffffff,ffffffff", "/sys/devices/virtual/workqueue/cpumask"
-        sudo_write "ffffffff,ffffffff,ffffffff,ffffffff", "/sys/bus/workqueue/devices/writeback/cpumask"
-        sudo_write "ffffffff,ffffffff,ffffffff,ffffffff", "/proc/irq/default_smp_affinity"
+        sudo_write "ffff", "/sys/devices/virtual/workqueue/cpumask"
+        sudo_write "ffff", "/sys/bus/workqueue/devices/writeback/cpumask"
+        sudo_write "ffff", "/proc/irq/default_smp_affinity"
         sudo_write original_sched_rt, "/proc/sys/kernel/sched_rt_runtime_us"
         sudo_write original_watchdog, "/proc/sys/kernel/watchdog"
         sudo_write original_stat_interval, "/proc/sys/vm/stat_interval"

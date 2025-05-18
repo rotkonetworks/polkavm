@@ -45,9 +45,6 @@ mod backend_pvfexecutor;
 #[cfg(all(feature = "ckb-vm", target_arch = "x86_64"))]
 mod backend_ckbvm;
 
-#[cfg(all(feature = "wasm3", target_arch = "x86_64"))]
-mod backend_wasm3;
-
 #[cfg(all(feature = "wasmtime", any(target_arch = "x86_64", target_arch = "aarch64")))]
 mod backend_wasmtime;
 
@@ -282,9 +279,6 @@ define_backends! {
     #[cfg(all(feature = "solana_rbpf", target_arch = "x86_64", not(target_os = "windows")))]
     SolanaRbpf => backend_solana_rbpf::SolanaRbpf(),
 
-    #[cfg(all(feature = "wasm3", target_arch = "x86_64"))]
-    Wasm3 => backend_wasm3::Wasm3(),
-
     #[cfg(feature = "wasmi")]
     Wasmi_Eager => backend_wasmi::Wasmi(backend_wasmi::WasmiConfig::Eager),
     #[cfg(feature = "wasmi")]
@@ -357,8 +351,6 @@ impl BenchmarkKind {
                 {
                     #[cfg(feature = "pvf-executor")]
                     output.push(BackendKind::PvfExecutor);
-                    #[cfg(feature = "wasm3")]
-                    output.push(BackendKind::Wasm3);
                 }
             }
             BenchmarkKind::Ckbvm => {

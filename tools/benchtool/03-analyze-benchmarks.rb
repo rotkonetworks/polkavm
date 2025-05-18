@@ -97,7 +97,6 @@ NAME_MAP = {
     "ckbvm_non_asm" => "CKB VM (non-ASM)",
     "polkavm32_interpreter" => "PolkaVM (32-bit, interpreter)",
     "polkavm64_interpreter" => "PolkaVM (64-bit, interpreter)",
-    "wasm3" => "Wasm3",
 
     "runtime" => "Execution time",
     "compilation" => "Compilation time",

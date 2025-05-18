@@ -22,8 +22,8 @@ impl Backend for Wasmer {
     }
 
     fn create(&self, _args: CreateArgs) -> Self::Engine {
-        let config = Box::new(wasmer::Singlepass::new());
-        <wasmer::Engine as wasmer::NativeEngineExt>::new(config, wasmer::Target::default(), wasmer::sys::Features::default())
+        let config = Box::new(wasmer::sys::Singlepass::new());
+        <wasmer::Engine as wasmer::sys::NativeEngineExt>::new(config, wasmer::sys::Target::default(), wasmer::sys::Features::default())
     }
 
     fn load(&self, path: &Path) -> Self::Blob {
