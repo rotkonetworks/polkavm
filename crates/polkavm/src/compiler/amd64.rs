@@ -8,6 +8,28 @@ use polkavm_assembler::amd64::RegIndex::*;
 use polkavm_assembler::amd64::{Condition, LoadKind, MemOp, RegSize, Size};
 use polkavm_assembler::{Label, NonZero, ReservedAssembler, U1, U2, U3, U4};
 
+/// Returns true if the CPU supports BMI1 instructions (including ANDN).
+#[cfg(feature = "std")]
+fn has_bmi1() -> bool {
+    std::is_x86_feature_detected!("bmi1")
+}
+
+#[cfg(not(feature = "std"))]
+fn has_bmi1() -> bool {
+    false
+}
+
+/// Returns true if the CPU supports BMI2 instructions (including SHLX/SHRX/SARX).
+#[cfg(feature = "std")]
+fn has_bmi2() -> bool {
+    std::is_x86_feature_detected!("bmi2")
+}
+
+#[cfg(not(feature = "std"))]
+fn has_bmi2() -> bool {
+    false
+}
+
 use polkavm_common::cast::cast;
 use polkavm_common::program::{ProgramCounter, RawReg, Reg};
 use polkavm_common::utils::GasVisitorT;
@@ -439,9 +461,47 @@ where
     fn shift(&mut self, reg_size: RegSize, d: RawReg, s1: impl Into<RegImm>, s2: RawReg, kind: ShiftKind) {
         let d = conv_reg(d);
         let s2 = conv_reg(s2);
-        let asm = self.asm.reserve::<polkavm_assembler::U4>();
 
-        // TODO: Consider using shlx/shrx/sarx when BMI2 is available.
+        // Use BMI2 SHLX/SHRX/SARX when available - avoids clobbering rcx
+        if has_bmi2() {
+            let asm = self.asm.reserve::<polkavm_assembler::U4>();
+            let s1_reg = match s1.into() {
+                RegImm::Reg(s1) => {
+                    let s1 = conv_reg(s1);
+                    (asm.push_none(), s1)
+                }
+                RegImm::Imm(s1) => {
+                    // Need to load immediate into a register first
+                    let asm = match reg_size {
+                        RegSize::R32 => asm.push(mov_imm(TMP_REG, imm32(s1))),
+                        RegSize::R64 => asm.push(mov_imm(TMP_REG, imm64(cast(s1).to_signed()))),
+                    };
+                    (asm, TMP_REG)
+                }
+            };
+            let (asm, s1) = s1_reg;
+
+            // BMI2 shifts: shlx dst, a, b computes dst = a << b
+            // encode_vex_3op puts second param in vvvv (shift count) and third in r/m (value)
+            // So we call shlx(d, s2, s1) which makes vvvv=s2 (shift), r/m=s1 (value)
+            // Result: d = s1 << s2
+            let asm = match kind {
+                ShiftKind::LogicalLeft => asm.push(shlx(reg_size, d.into_reg(), s2.into_reg(), s1.into_reg())),
+                ShiftKind::LogicalRight => asm.push(shrx(reg_size, d.into_reg(), s2.into_reg(), s1.into_reg())),
+                ShiftKind::ArithmeticRight => asm.push(sarx(reg_size, d.into_reg(), s2.into_reg(), s1.into_reg())),
+            };
+
+            let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
+                asm.push(movsxd_32_to_64(d, d))
+            } else {
+                asm.push_none()
+            };
+
+            asm.push_none().assert_reserved_exactly_as_needed();
+            return;
+        }
+
+        let asm = self.asm.reserve::<polkavm_assembler::U4>();
         let asm = asm.push(mov(reg_size, rcx, s2));
         let asm = match s1.into() {
             RegImm::Reg(s1) => {
@@ -1057,7 +1117,14 @@ where
         let s1 = conv_reg(s1);
         let s2 = conv_reg(s2);
 
-        // todo: change this with ANDN instruction
+        // Use BMI1 ANDN when available: andn dst, a, b computes dst = NOT(a) AND b
+        // We want d = s1 AND NOT(s2), so we use: andn d, s2, s1 => d = NOT(s2) AND s1
+        if has_bmi1() {
+            let asm = self.asm.reserve::<U3>();
+            let asm = asm.push(andn(reg_size, d.into_reg(), s2.into_reg(), s1.into_reg()));
+            asm.push_none().push_none().assert_reserved_exactly_as_needed();
+            return;
+        }
 
         let asm = self.asm.reserve::<U3>();
         if d == s1 {
