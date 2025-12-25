@@ -1873,6 +1873,86 @@ pub mod inst {
                 Some((self.1, FixupKind::new_3([u32::from(inst.rex), u32::from(inst.opcode), u32::from(inst.modrm)], 4)))
             },
             (fmt.write_fmt(core::format_args!("lea {}, [{}]", self.0, self.1))),
+
+        // BMI1: ANDN - Logical AND NOT
+        // VEX.NDS.LZ.0F38.W0 F2 /r (32-bit)
+        // VEX.NDS.LZ.0F38.W1 F2 /r (64-bit)
+        // dst = src1 AND (NOT src2)
+        andn(RegSize, Reg, Reg, Reg) =>
+            encode_vex_3op(self.0, self.1, self.2, self.3, 0xf2, VexPrefix::None),
+            None,
+            (fmt.write_fmt(core::format_args!("andn {}, {}, {}", self.1.name_from(self.0), self.2.name_from(self.0), self.3.name_from(self.0)))),
+
+        // BMI2: SHLX - Shift Logical Left Without Affecting Flags
+        // VEX.NDS.LZ.66.0F38.W0 F7 /r (32-bit)
+        // VEX.NDS.LZ.66.0F38.W1 F7 /r (64-bit)
+        // dst = src1 << src2
+        shlx(RegSize, Reg, Reg, Reg) =>
+            encode_vex_3op(self.0, self.1, self.2, self.3, 0xf7, VexPrefix::P66),
+            None,
+            (fmt.write_fmt(core::format_args!("shlx {}, {}, {}", self.1.name_from(self.0), self.2.name_from(self.0), self.3.name_from(self.0)))),
+
+        // BMI2: SHRX - Shift Logical Right Without Affecting Flags
+        // VEX.NDS.LZ.F2.0F38.W0 F7 /r (32-bit)
+        // VEX.NDS.LZ.F2.0F38.W1 F7 /r (64-bit)
+        // dst = src1 >> src2 (logical)
+        shrx(RegSize, Reg, Reg, Reg) =>
+            encode_vex_3op(self.0, self.1, self.2, self.3, 0xf7, VexPrefix::PF2),
+            None,
+            (fmt.write_fmt(core::format_args!("shrx {}, {}, {}", self.1.name_from(self.0), self.2.name_from(self.0), self.3.name_from(self.0)))),
+
+        // BMI2: SARX - Shift Arithmetic Right Without Affecting Flags
+        // VEX.NDS.LZ.F3.0F38.W0 F7 /r (32-bit)
+        // VEX.NDS.LZ.F3.0F38.W1 F7 /r (64-bit)
+        // dst = src1 >> src2 (arithmetic)
+        sarx(RegSize, Reg, Reg, Reg) =>
+            encode_vex_3op(self.0, self.1, self.2, self.3, 0xf7, VexPrefix::PF3),
+            None,
+            (fmt.write_fmt(core::format_args!("sarx {}, {}, {}", self.1.name_from(self.0), self.2.name_from(self.0), self.3.name_from(self.0)))),
+    }
+
+    /// VEX prefix type for BMI instructions
+    #[derive(Copy, Clone)]
+    enum VexPrefix {
+        None,  // No prefix (0F38 map)
+        P66,   // 66 prefix
+        PF2,   // F2 prefix
+        PF3,   // F3 prefix
+    }
+
+    /// Encode a 3-operand VEX instruction (BMI1/BMI2 style)
+    /// Uses 3-byte VEX prefix: C4 RXB mmmmm Wvvvv Lpp
+    fn encode_vex_3op(reg_size: RegSize, dst: Reg, src1: Reg, src2: Reg, opcode: u8, prefix: VexPrefix) -> InstBuf {
+        // 3-byte VEX prefix format:
+        // Byte 0: 0xC4
+        // Byte 1: RXB mmmmm (R=~dst.bit3, X=0, B=~src2.bit3, mmmmm=0x02 for 0F38)
+        // Byte 2: W vvvv L pp (W=1 for 64-bit, vvvv=~src1, L=0, pp=prefix)
+
+        let w = matches!(reg_size, RegSize::R64);
+        let pp = match prefix {
+            VexPrefix::None => 0b00,
+            VexPrefix::P66 => 0b01,
+            VexPrefix::PF3 => 0b10,
+            VexPrefix::PF2 => 0b11,
+        };
+
+        // R bit: inverted high bit of ModRM.reg (dst)
+        let r = if dst as u8 >= 8 { 0 } else { 1 };
+        // X bit: always 1 (no SIB index extension)
+        let x = 1;
+        // B bit: inverted high bit of ModRM.rm (src2)
+        let b = if src2 as u8 >= 8 { 0 } else { 1 };
+
+        // VEX.vvvv: inverted src1 register
+        let vvvv = (!(src1 as u8)) & 0x0f;
+
+        let vex1 = (r << 7) | (x << 6) | (b << 5) | 0x02; // mmmmm = 0x02 for 0F38
+        let vex2 = ((w as u8) << 7) | (vvvv << 3) | pp;   // L = 0
+
+        // ModRM: mod=11 (register), reg=dst[2:0], rm=src2[2:0]
+        let modrm = 0xc0 | ((dst as u8 & 0x07) << 3) | (src2 as u8 & 0x07);
+
+        InstBuf::from_array([0xc4, vex1, vex2, opcode, modrm])
     }
 }
 
