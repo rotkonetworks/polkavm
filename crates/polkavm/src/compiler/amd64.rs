@@ -5,13 +5,27 @@ use polkavm_assembler::amd64::inst::*;
 use polkavm_assembler::amd64::Reg::rsp;
 use polkavm_assembler::amd64::RegIndex as NativeReg;
 use polkavm_assembler::amd64::RegIndex::*;
-use polkavm_assembler::amd64::{Condition, LoadKind, MemOp, RegSize, Size};
+use polkavm_assembler::amd64::{Condition, LoadKind, MemOp, RegSize, Scale, Size};
 use polkavm_assembler::{Label, NonZero, ReservedAssembler, U1, U2, U3, U4};
 
 /// Returns true if the CPU supports BMI1 instructions (including ANDN).
 #[cfg(feature = "std")]
 fn has_bmi1() -> bool {
     std::is_x86_feature_detected!("bmi1")
+}
+
+/// Convert a register to a SIB index register.
+/// Returns None for rsp which cannot be used as a SIB index.
+#[inline]
+fn reg_to_reg_index(reg: NativeReg) -> Option<NativeReg> {
+    // rsp cannot be used as a SIB index (encoding 100 means "no index")
+    // Note: RegIndex doesn't include rsp, so this should always succeed
+    // but we keep the check for safety
+    if reg as u8 == 4 {
+        None
+    } else {
+        Some(reg)
+    }
 }
 
 #[cfg(not(feature = "std"))]
@@ -1069,16 +1083,30 @@ where
                     ));
                 }
 
-                // TODO: This also could be more efficient.
+                // Compute jump table entry address and load target
+                // Using scaled indexed addressing: [jump_table + base*8 + offset*8]
                 self.push(lea_rip_label(TMP_REG, self.jump_table_label));
-                self.push(push(conv_reg(base)));
-                self.push(shl_imm(RegSize::R64, conv_reg(base), 3));
-                if offset > 0 {
-                    let offset = offset.wrapping_mul(8);
-                    self.push(add((conv_reg(base), imm32(offset))));
+                let base_reg = conv_reg(base);
+
+                // Use lea with scaled index to compute address without modifying base
+                // lea TMP_REG, [TMP_REG + base*8 + offset*8]
+                let scaled_offset = (offset as i32).wrapping_mul(8);
+                if let Some(base_as_index) = reg_to_reg_index(base_reg) {
+                    self.push(lea(
+                        RegSize::R64,
+                        TMP_REG,
+                        base_index_scale_offset(RegSize::R64, TMP_REG, base_as_index, Scale::x8, scaled_offset),
+                    ));
+                } else {
+                    // base_reg is rsp which can't be used as SIB index, fallback to push/pop
+                    self.push(push(base_reg));
+                    self.push(shl_imm(RegSize::R64, base_reg, 3));
+                    if offset > 0 {
+                        self.push(add((base_reg, imm32(offset.wrapping_mul(8)))));
+                    }
+                    self.push(add((RegSize::R64, TMP_REG, base_reg)));
+                    self.push(pop(base_reg));
                 }
-                self.push(add((RegSize::R64, TMP_REG, conv_reg(base))));
-                self.push(pop(conv_reg(base)));
                 self.push(load(LoadKind::U64, TMP_REG, reg_indirect(RegSize::R64, TMP_REG)));
 
                 if let Some((return_register, return_address)) = load_imm {
@@ -1899,24 +1927,55 @@ where
                     assert!(TMP_REG as u32 != rax as u32);
                 };
 
-                // TODO: This is not the most efficient implementation. We can optimize this.
-                self.push(push(AUX_TMP_REG));
-                self.push(push(rax));
-                self.push(push(rdx));
+                // mulhsu computes: high64(signed(s1) * unsigned(s2))
+                // = mulhu(s1, s2) + (s1 >> 63) * s2
+                // where (s1 >> 63) is the arithmetic sign extension (-1 or 0)
 
-                self.push(mov(RegSize::R64, TMP_REG, s1));
-                self.push(mov(RegSize::R64, AUX_TMP_REG, s2));
+                // Optimization: use d as temporary when it's not rax/rdx
+                // This avoids pushing/popping AUX_TMP_REG
+                if d != rax && d != rdx {
+                    self.push(push(rax));
+                    self.push(push(rdx));
 
-                self.push(mov(RegSize::R64, rax, s2));
-                self.push(mul(RegSize::R64, TMP_REG));
-                self.push(sar_imm(RegSize::R64, TMP_REG, 63));
-                self.push(imul(RegSize::R64, TMP_REG, AUX_TMP_REG));
-                self.push(lea(RegSize::R64, TMP_REG, base_index(RegSize::R64, TMP_REG, rdx)));
+                    // Save s2 in d (our temporary)
+                    self.push(mov(RegSize::R64, d, s2));
+                    // Save s1's sign in TMP_REG
+                    self.push(mov(RegSize::R64, TMP_REG, s1));
 
-                self.push(pop(rdx));
-                self.push(pop(rax));
-                self.push(pop(AUX_TMP_REG));
-                self.push(mov(RegSize::R64, d, TMP_REG));
+                    // Unsigned multiply: rdx:rax = s1 * s2
+                    self.push(mov(RegSize::R64, rax, s2));
+                    self.push(mul(RegSize::R64, TMP_REG));
+
+                    // Compute sign correction: TMP_REG = (s1 < 0) ? -s2 : 0
+                    self.push(sar_imm(RegSize::R64, TMP_REG, 63));
+                    self.push(imul(RegSize::R64, TMP_REG, d));
+
+                    // Add correction to high bits: TMP_REG = rdx + correction
+                    self.push(lea(RegSize::R64, TMP_REG, base_index(RegSize::R64, TMP_REG, rdx)));
+
+                    self.push(pop(rdx));
+                    self.push(pop(rax));
+                    self.push(mov(RegSize::R64, d, TMP_REG));
+                } else {
+                    // Fallback: d is rax or rdx, need to use AUX_TMP_REG
+                    self.push(push(AUX_TMP_REG));
+                    self.push(push(rax));
+                    self.push(push(rdx));
+
+                    self.push(mov(RegSize::R64, TMP_REG, s1));
+                    self.push(mov(RegSize::R64, AUX_TMP_REG, s2));
+
+                    self.push(mov(RegSize::R64, rax, s2));
+                    self.push(mul(RegSize::R64, TMP_REG));
+                    self.push(sar_imm(RegSize::R64, TMP_REG, 63));
+                    self.push(imul(RegSize::R64, TMP_REG, AUX_TMP_REG));
+                    self.push(lea(RegSize::R64, TMP_REG, base_index(RegSize::R64, TMP_REG, rdx)));
+
+                    self.push(pop(rdx));
+                    self.push(pop(rax));
+                    self.push(pop(AUX_TMP_REG));
+                    self.push(mov(RegSize::R64, d, TMP_REG));
+                }
             }
         }
     }

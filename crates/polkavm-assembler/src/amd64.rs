@@ -1004,6 +1004,11 @@ pub mod addr {
         MemOp::BaseIndexScaleOffset(None, reg_size, base.into(), index, Scale::x1, 0)
     }
 
+    #[inline]
+    pub fn base_index_scale_offset(reg_size: RegSize, base: impl Into<Reg>, index: RegIndex, scale: Scale, offset: i32) -> MemOp {
+        MemOp::BaseIndexScaleOffset(None, reg_size, base.into(), index, scale, offset)
+    }
+
     impl From<(RegSize, Reg, Reg)> for Operands {
         #[inline]
         fn from((reg_size, dst, src): (RegSize, Reg, Reg)) -> Self {
