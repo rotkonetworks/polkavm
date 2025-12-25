@@ -1617,10 +1617,20 @@ where
             (_, _, _) if d == s1 => asm.push(add((reg_size, d, s2))).push_none(),
             // d = s1 + d
             (_, _, _) if d == s2 => asm.push(add((reg_size, d, s1))).push_none(),
-            // d = s1 + s2
+            // d = s1 + s2, try to use LEA with base+index
             _ => {
-                let asm = asm.push_if(d != s1, mov(reg_size, d, s1));
-                asm.push(add((reg_size, d, s2)))
+                // Try to use LEA [s1 + s2] which is a single instruction
+                // Note: rsp cannot be used as SIB index register
+                if let Some(s2_as_index) = reg_to_reg_index(s2) {
+                    asm.push(lea(reg_size, d, base_index(reg_size, s1, s2_as_index))).push_none()
+                } else if let Some(s1_as_index) = reg_to_reg_index(s1) {
+                    // s2 is rsp, try swapping (add is commutative)
+                    asm.push(lea(reg_size, d, base_index(reg_size, s2, s1_as_index))).push_none()
+                } else {
+                    // Both are rsp (shouldn't happen in practice), fall back
+                    let asm = asm.push(mov(reg_size, d, s1));
+                    asm.push(add((reg_size, d, s2)))
+                }
             }
         };
 
@@ -2137,16 +2147,28 @@ where
 
     #[inline(always)]
     pub fn load_imm(&mut self, dst: RawReg, s2: u32) {
-        match B::BITNESS {
-            Bitness::B32 => self.push(mov_imm(conv_reg(dst), imm32(s2))),
-            Bitness::B64 => self.push(mov_imm(conv_reg(dst), imm64(cast(s2).to_signed()))),
+        let dst = conv_reg(dst);
+        if s2 == 0 {
+            // xor reg, reg is the preferred idiom for zeroing (shorter, breaks dependencies)
+            self.push(xor((RegSize::R32, dst, dst)));
+        } else {
+            match B::BITNESS {
+                Bitness::B32 => self.push(mov_imm(dst, imm32(s2))),
+                Bitness::B64 => self.push(mov_imm(dst, imm64(cast(s2).to_signed()))),
+            }
         }
     }
 
     #[inline(always)]
     pub fn load_imm64(&mut self, dst: RawReg, s2: u64) {
         assert_eq!(B::BITNESS, Bitness::B64);
-        self.push(mov_imm64(conv_reg(dst), s2));
+        let dst = conv_reg(dst);
+        if s2 == 0 {
+            // xor reg, reg is the preferred idiom for zeroing (shorter, breaks dependencies)
+            self.push(xor((RegSize::R32, dst, dst)));
+        } else {
+            self.push(mov_imm64(dst, s2));
+        }
     }
 
     #[inline(always)]
